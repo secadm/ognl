@@ -35,6 +35,10 @@ import ognl.enhance.OrderedReturn;
 import ognl.enhance.UnsupportedCompilationException;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -156,7 +160,7 @@ public class ASTMethod extends SimpleNode implements OrderedReturn, NodeType
 
         try {
             m = OgnlRuntime.getMethod(context, context.getCurrentType() != null ? context.getCurrentType() : target.getClass(), _methodName, _children, false);
-            Class[] argumentClasses = getChildrenClasses(context, _children);
+            ClassType[] argumentClasses = getChildrenClasses(context, _children);
             if (m == null)
                 m = OgnlRuntime.getReadMethod(target.getClass(), _methodName, argumentClasses);
 
@@ -488,13 +492,13 @@ public class ASTMethod extends SimpleNode implements OrderedReturn, NodeType
         return result + ")" + post;
     }
 
-    private static Class getClassMatchingAllChildren(OgnlContext context, Node[] _children) {
-        Class[] cc = getChildrenClasses(context, _children);
-        Class componentType = null;
+    private static ClassType getClassMatchingAllChildren(OgnlContext context, Node[] _children) {
+        ClassType[] cc = getChildrenClasses(context, _children);
+        ClassType componentType = null;
         for (int j = 0; j < cc.length; j++) {
-            Class ic = cc[j];
+            ClassType ic = cc[j];
             if (ic == null) {
-                componentType = Object.class; // fall back to object...
+                componentType = ClassType.CT_Object; // fall back to object...
                 break;
             } else {
                 if (componentType == null) {
@@ -504,7 +508,7 @@ public class ASTMethod extends SimpleNode implements OrderedReturn, NodeType
                         if (ic.isAssignableFrom(componentType)) {
                             componentType = ic; // just swap... ic is more generic...
                         } else {
-                            Class pc;
+                            ClassType pc;
                             while ((pc = componentType.getSuperclass()) != null) { // TODO hmm - it could also be that an interface matches...
                                 if (pc.isAssignableFrom(ic)) {
                                     componentType = pc; // use this matching parent class
@@ -513,7 +517,7 @@ public class ASTMethod extends SimpleNode implements OrderedReturn, NodeType
                             }
                             if (!componentType.isAssignableFrom(ic)) {
                                 // parents didn't match. the types might be primitives. Fall back to object.
-                                componentType = Object.class;
+                                componentType = ClassType.CT_Object;
                                 break;
                             }
                         }
@@ -522,25 +526,127 @@ public class ASTMethod extends SimpleNode implements OrderedReturn, NodeType
             }
         }
         if (componentType == null)
-            componentType = Object.class;
+            componentType = ClassType.CT_Object;
         return componentType;
     }
 
-    private static Class[] getChildrenClasses(OgnlContext context, Node[] _children) {
+    public static class ClassType {
+        static final ClassType CT_Object = new ClassType(Object.class);
+        static final ClassType CT_primitive_Boolean = new ClassType(Boolean.TYPE, Boolean.class);
+        static final ClassType CT_primitive_Integer = new ClassType(Integer.TYPE, Integer.class);
+        static final ClassType CT_primitive_Double = new ClassType(Double.TYPE, Double.class);
+        static final ClassType CT_primitive_Byte = new ClassType(Byte.TYPE, Byte.class);
+        static final ClassType CT_primitive_Long = new ClassType(Long.TYPE, Long.class);
+        static final ClassType CT_primitive_Float = new ClassType(Float.TYPE, Float.class);
+        static final ClassType CT_primitive_Short = new ClassType(Short.TYPE, Short.class);
+        static final ClassType CT_primitive_Character = new ClassType(Character.TYPE, Character.class);
+
+        final boolean       primitive;
+        final Class<?>      clazz;
+        final Class<?>      nonPrimitive;
+        final ClassType[]   usedGenericTypes;
+
+        protected ClassType(Class<?> clazz) {
+            this.clazz = clazz;
+            this.primitive = false;
+            this.nonPrimitive = null;
+            this.usedGenericTypes = null;
+        }
+
+        // initializer for primitives
+        private ClassType(Class<?> primitive, Class<?> nonPrimitive) {
+            this.clazz = primitive;
+            this.primitive = true;
+            this.nonPrimitive = nonPrimitive;
+            this.usedGenericTypes = null;
+        }
+
+        public ClassType(Class<?> clazz, ClassType[] usedGenericTypes) {
+            this.clazz = clazz;
+            this.primitive = false;
+            this.nonPrimitive = null;
+            TypeVariable<?>[] genericTypes = clazz.getTypeParameters();
+            if (genericTypes == null || genericTypes.length != usedGenericTypes.length) {
+                throw new IllegalArgumentException("Generics count invalid for '"+ clazz.getName()
+                    + ":' Defined by class: '"+Arrays.toString(genericTypes)
+                    + "' given: '"+Arrays.toString(usedGenericTypes) + "'");
+            }
+            for (int i=0; i < genericTypes.length; i++) {
+                Type[] b = genericTypes[i].getBounds();
+                if (b.length != 1) // TODO when does this happen?
+                    throw new IllegalArgumentException("Only one Generics upper bound expected for " + clazz.getName());
+                Type b0 = b[0];
+                if (b0 instanceof Class) {
+                    Class<?> bc = (Class<?>) b0;
+                    // for generics we need the non-primitive type...
+                    if (!bc.isAssignableFrom(usedGenericTypes[i].primitive ? usedGenericTypes[i].nonPrimitive : usedGenericTypes[i].clazz))
+                        throw new IllegalArgumentException("Generics invalid for '"+ clazz.getName()
+                            + ":' Parameter " + i + " with Name '" + genericTypes[i].getName() + "' of type '"
+                            + bc.getName() + "' is not assignable by type '" + usedGenericTypes[i] + "'");
+                } else
+                    throw new IllegalArgumentException("Generics bounds should be class types - please open a ticket with a test case!");
+            }
+
+            this.usedGenericTypes = usedGenericTypes;
+        }
+
+        public ClassType getSuperclass() {
+            // TODO handle generics!
+            return forType(clazz.getSuperclass());
+        }
+
+        public boolean isAssignableFrom(ClassType ic) {
+            // TODO handle generics!
+            return clazz.isAssignableFrom(ic.clazz);
+        }
+
+        public static ClassType forType(Class c) {
+            if (c.isPrimitive()) {
+                if (c == Boolean.TYPE)
+                    return CT_primitive_Boolean;
+                else if (c == Integer.TYPE)
+                    return CT_primitive_Integer;
+                else if (c == Double.TYPE)
+                    return CT_primitive_Double;
+                else if (c == Byte.TYPE)
+                    return CT_primitive_Byte;
+                else if (c == Long.TYPE)
+                    return CT_primitive_Long;
+                else if (c == Float.TYPE)
+                    return CT_primitive_Float;
+                else if (c == Short.TYPE)
+                    return CT_primitive_Short;
+                else if (c == Character.TYPE)
+                    return CT_primitive_Character;
+                else
+                    throw new IllegalArgumentException("New unknown primitive type: "+c);
+            }
+            return new ClassType(c);
+        }
+    }
+
+    private static ClassType[] getChildrenClasses(OgnlContext context, Node[] _children) {
         if (_children == null)
             return null;
-        Class[] argumentClasses = new Class[_children.length];
+        ClassType[] argumentClasses = new ClassType[_children.length];
         for (int i = 0; i < _children.length; i++) {
             Node child = _children[i];
-            if (child instanceof ASTList) {	// special handling for ASTList - it creates a List
-                //Class componentType = getClassMatchingAllChildren(context, ((ASTList)child)._children);
+            if (child instanceof ASTList) {    // special handling for ASTList - it creates a List
+                ClassType componentType = getClassMatchingAllChildren(context, ((ASTList)child)._children);
                 //argumentClasses[i] = Array.newInstance(componentType, 0).getClass();
-                argumentClasses[i] = List.class;
+                argumentClasses[i] = new ClassType(List.class, new ClassType[] { componentType });
+                //Class<?> testclass = TestClass.class;
+                //Method[] methods = testclass.getMethods();
+                Type superClass = List.class.getGenericSuperclass();
+                if (superClass instanceof ParameterizedType) {
+                    System.out.println(((ParameterizedType)superClass).getActualTypeArguments());
+                }
+                //System.out.println(testclass);
             } else if (child instanceof NodeType) {
-                argumentClasses[i] = ((NodeType)child).getGetterClass();
+                argumentClasses[i] = ClassType.forType(((NodeType)child).getGetterClass());
             } else if (child instanceof ASTCtor) {
                 try {
-                    argumentClasses[i] = ((ASTCtor)child).getCreatedClass(context);
+                    argumentClasses[i] = ClassType.forType(((ASTCtor)child).getCreatedClass(context));
                 } catch (ClassNotFoundException nfe) {
                     throw OgnlOps.castToRuntime(nfe);
                 }

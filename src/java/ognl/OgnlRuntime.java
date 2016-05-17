@@ -30,6 +30,7 @@
 // --------------------------------------------------------------------------
 package ognl;
 
+import ognl.ASTMethod.ClassType;
 import ognl.enhance.ExpressionCompiler;
 import ognl.enhance.OgnlExpressionCompiler;
 import ognl.internal.ClassCache;
@@ -903,35 +904,45 @@ public class OgnlRuntime {
      * @param arg an object that is being passed to a method
      * @return the class to use to look up the method
      */
-    public static final Class getArgClass(Object arg)
+    public static final ClassType getArgClass(Object arg)
     {
         if (arg == null)
             return null;
         Class c = arg.getClass();
         if (c == Boolean.class)
-            return Boolean.TYPE;
+            return ClassType.CT_primitive_Boolean;
         else if (c.getSuperclass() == Number.class) {
             if (c == Integer.class)
-                return Integer.TYPE;
+                return ClassType.CT_primitive_Integer;
             if (c == Double.class)
-                return Double.TYPE;
+                return ClassType.CT_primitive_Double;
             if (c == Byte.class)
-                return Byte.TYPE;
+                return ClassType.CT_primitive_Byte;
             if (c == Long.class)
-                return Long.TYPE;
+                return ClassType.CT_primitive_Long;
             if (c == Float.class)
-                return Float.TYPE;
+                return ClassType.CT_primitive_Float;
             if (c == Short.class)
-                return Short.TYPE;
+                return ClassType.CT_primitive_Short;
         } else if (c == Character.class)
-            return Character.TYPE;
-        return c;
+            return ClassType.CT_primitive_Character;
+
+        // TODO okay, at this point we should have the generics declaration for that object.
+        // but due to http://www.angelikalanger.com/GenericsFAQ/FAQSections/TechnicalDetails.html#Type%20Erasure
+        // we don't have this information any more during runtime.. *sigh*...
+        /*
+        List<String> sl = new ArrayList<String>();
+        Type gsc = sl.getClass().getGenericSuperclass();
+        ParameterizedType pt = (ParameterizedType) gsc;
+        Type ct = pt.getActualTypeArguments()[0];
+        */
+        return ClassType.forType(c);
     }
 
-    public static Class[] getArgClasses(Object[] args) {
+    public static ClassType[] getArgClasses(Object[] args) {
         if (args == null)
             return null;
-        Class[] argClasses = new Class[args.length];
+        ClassType[] argClasses = new ClassType[args.length];
         for (int i=0; i<args.length; i++)
             argClasses[i] = getArgClass(args[i]);
         return argClasses;
@@ -954,13 +965,14 @@ public class OgnlRuntime {
         return true;
     }
 
-    public static final boolean isTypeCompatible(Class parameterClass, Class methodArgumentClass, int index, ArgsCompatbilityReport report)
+    public static final boolean isTypeCompatible(ClassType parameterClassType, Class methodArgumentClass, int index, ArgsCompatbilityReport report)
     {
-        if (parameterClass == null) {
+        if (parameterClassType == null) {
             // happens when we cannot determine parameter...
             report.score += 500;
             return true;
         }
+        Class parameterClass = parameterClassType.clazz;
         if (parameterClass == methodArgumentClass)
             return true;  // exact match, no additional score
         //if (methodArgumentClass.isPrimitive())
@@ -977,9 +989,26 @@ public class OgnlRuntime {
                 //return isTypeCompatible(pct, mct, index, report); // check inner classes
             }
             if (Collection.class.isAssignableFrom(parameterClass)) {
-                // TODO get generics type here and do further evaluations...
+                // check generics
+                ClassType[] usedGenericTypes = parameterClassType.usedGenericTypes;
                 report.conversionNeeded[index]=true;
-                report.score += 10;
+                report.score += 30;
+                if (usedGenericTypes == null || usedGenericTypes.length == 0) {
+                    report.score += 500; // not sure about parameters
+                } else {
+                    // for list - always type 0...
+                    Class innerType = usedGenericTypes[0].clazz;
+                    Class mct = methodArgumentClass.getComponentType();
+                    if (mct == innerType) {
+                        // exact type match - good
+                        return true;
+                    } else if (mct.isAssignableFrom(innerType)) {
+                        // two arrays are better then a array and a list or other conversions...
+                        report.score += 5;
+                        return true;
+                    } else
+                        return false; // not assignable!
+                }
                 return true;
             }
         } else if (Collection.class.isAssignableFrom(methodArgumentClass)) {
@@ -1060,7 +1089,7 @@ public class OgnlRuntime {
         return true;
     }
 
-    public static ArgsCompatbilityReport areArgsCompatible(Class[] args, Class[] classes, Method m)
+    public static ArgsCompatbilityReport areArgsCompatible(ClassType[] args, Class[] classes, Method m)
     {
         boolean varArgs = m != null && isJdk15() && m.isVarArgs();
 
@@ -1278,7 +1307,7 @@ public class OgnlRuntime {
             {
                 typeClass = (Class)source;
             }
-            Class[] argClasses = getArgClasses(args);
+            ClassType[] argClasses = getArgClasses(args);
 
             MatchingMethod mm = findBestMethod(methods, typeClass, methodName, argClasses);
             if (mm != null) {
@@ -1338,7 +1367,7 @@ public class OgnlRuntime {
         }
     }
 
-    private static MatchingMethod findBestMethod(List methods, Class typeClass, String name, Class[] argClasses) {
+    private static MatchingMethod findBestMethod(List methods, Class typeClass, String name, ClassType[] argClasses) {
         MatchingMethod mm = null;
         for (int i = 0, icount = methods.size(); i < icount; i++) {
             Method m = (Method) methods.get(i);
@@ -1398,10 +1427,10 @@ public class OgnlRuntime {
                         int scoreCurr = 0;
                         int scoreOther = 0;
                         for (int j=0; j<argClasses.length; j++) {
-                            Class argClass = argClasses[j];
+                            ClassType argClassType = argClasses[j];
                             Class mcClass = mm.mParameterTypes[j];
                             Class moClass = mParameterTypes[j];
-                            if (argClass == null) {	// TODO can we avoid this case?
+                            if (argClassType == null) {	// TODO can we avoid this case?
                                 // we don't know the class. use the most generic implementation...
                                 if (mcClass == moClass) {
                                     // equal args - no winner...
@@ -1414,12 +1443,13 @@ public class OgnlRuntime {
                                     throw new IllegalArgumentException("Can't decide wich method to use: \""+mm.mMethod+"\" or \""+m+"\"");
                                 }
                             } else {
+                                Class argClass = argClassType.clazz;
                                 // we try to find the more specific implementation
                                 if (mcClass == moClass) {
                                     // equal args - no winner...
                                 } else if (mcClass == argClass) {
                                     scoreOther += 100;	// current wins...
-                                } else if (moClass == argClass) {
+                                   } else if (moClass == argClass) {
                                     scoreCurr += 100;	// other wins...
                                 } else {
                                     // both items can't be assigned to each other..
@@ -2886,7 +2916,7 @@ public class OgnlRuntime {
         return getReadMethod(target, name, null);
     }
 
-    public static Method getReadMethod(Class target, String name, Class[] argClasses)
+    public static Method getReadMethod(Class target, String name, ClassType[] argClasses)
     {
         try {
             if (name.indexOf('"') >= 0)
@@ -2973,7 +3003,7 @@ public class OgnlRuntime {
         return getWriteMethod(target, name, null);
     }
 
-    public static Method getWriteMethod(Class target, String name, Class[] argClasses)
+    public static Method getWriteMethod(Class target, String name, ClassType[] argClasses)
     {
         try {
             if (name.indexOf('"') >= 0)
